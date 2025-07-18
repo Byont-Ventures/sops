@@ -16,7 +16,7 @@ Quickly installs a specified version of SOPS into the runner environment. This i
 
 ```yaml
 - name: Install SOPS
-  uses: byont-venture/sops@main
+  uses: byont-ventures/sops@main
   with:
     operation: "install"
     # sops-version: "v3.10.2" # Optional, uses default if not specified
@@ -30,7 +30,7 @@ Decrypts a SOPS-encrypted file and loads its key-value pairs as environment vari
 
 ```yaml
 - name: Load Secrets from SOPS File
-  uses: byont-venture/sops@main
+  uses: byont-ventures/sops@main
   with:
     operation: "load-secrets"
     sops-age-key: ${{ secrets.SOPS_AGE_KEY }}
@@ -45,7 +45,7 @@ Executes an arbitrary SOPS command. This is flexible for various use cases like 
 
 ```yaml
 - name: Decrypt a specific value using SOPS
-  uses: byont-venture/sops@main
+  uses: byont-ventures/sops@main
   with:
     operation: "execute-command"
     sops-age-key: ${{ secrets.SOPS_AGE_KEY }}
