@@ -1,0 +1,83 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install SOPS (default version, pinned checksum)
+        uses: ./
+        with:
+          operation: install
+
+      - name: Create test key and encrypted files
+        id: fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get install --yes age > /dev/null; else brew install age > /dev/null; fi
+          age-keygen -o "$RUNNER_TEMP/key.txt" 2> /dev/null
+          pub=$(grep -o 'age1[0-9a-z]*' "$RUNNER_TEMP/key.txt")
+          key=$(grep AGE-SECRET "$RUNNER_TEMP/key.txt")
+          echo "::add-mask::$key"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          printf '# comment\n\nFOO=bar\nBAZ=a=b\n' > test.env
+          SOPS_AGE_KEY="$key" sops -e --age "$pub" --input-type dotenv --output-type dotenv test.env > test.sops.env
+          printf '{"some_key":"v1"}' > test.json
+          SOPS_AGE_KEY="$key" sops -e --age "$pub" test.json > test.sops.json
+
+      - name: Load secrets
+        uses: ./
+        with:
+          operation: load-secrets
+          sops-age-key: ${{ steps.fixture.outputs.key }}
+          sops-file-path: test.sops.env
+
+      - name: Execute command with quoted arguments
+        uses: ./
+        with:
+          operation: execute-command
+          sops-age-key: ${{ steps.fixture.outputs.key }}
+          sops-args: '--decrypt --extract ''["some_key"]'' --output extracted.txt test.sops.json'
+
+      - name: Execute command with shell syntax in the arguments
+        continue-on-error: true
+        uses: ./
+        with:
+          operation: execute-command
+          sops-args: "--version; touch pwned"
+
+      - name: Check results
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FOO" = bar
+          test "$BAZ" = a=b
+          test "$(cat extracted.txt)" = v1
+          test ! -e pwned
+
+      - name: Install another version (release checksum file)
+        uses: ./
+        with:
+          operation: install
+          sops-version: v3.9.4
+
+      - name: Check installed version
+        shell: bash
+        run: sops --version 2> /dev/null | grep -F 'sops 3.9.4'
