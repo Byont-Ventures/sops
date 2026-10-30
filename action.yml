@@ -29,8 +29,16 @@ runs:
     # Install SOPS (runs for all operations)
     - name: Install SOPS
       shell: bash
+      env:
+        SOPS_VERSION: ${{ inputs.sops-version }}
       run: |
-        SOPS_VERSION="${{ inputs.sops-version }}"
+        set -euo pipefail
+
+        if ! [[ "$SOPS_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::sops-version must look like v3.10.2, got: $SOPS_VERSION"
+          exit 1
+        fi
+
         echo "Runner OS: $RUNNER_OS"
         ARCH=$(uname -m)
         echo "Architecture: $ARCH"
@@ -42,7 +50,7 @@ runs:
             SOPS_ARCH="linux.amd64"
           fi
         elif [ "$RUNNER_OS" == "macOS" ]; then
-          if [ "$ARCH" == "arm64" ]; then 
+          if [ "$ARCH" == "arm64" ]; then
             SOPS_ARCH="darwin.arm64"
           else # Default to amd64 for Intel Macs
             SOPS_ARCH="darwin.amd64"
@@ -52,14 +60,48 @@ runs:
           exit 1
         fi
 
-        echo "Downloading SOPS for $SOPS_ARCH"
-        curl -fS --retry 3 --retry-delay 5 -LO "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.${SOPS_ARCH}"
+        # Known SHA-256 checksums for the default version, from the official
+        # sops-v3.10.2.checksums.txt release asset.
+        case "${SOPS_VERSION}.${SOPS_ARCH}" in
+          v3.10.2.linux.amd64)  EXPECTED_SHA256="79b0f844237bd4b0446e4dc884dbc1765fc7dedc3968f743d5949c6f2e701739" ;;
+          v3.10.2.linux.arm64)  EXPECTED_SHA256="e91ddc04e6a78f5aed9e4fc347a279b539c43b74d99e6b8078e2f2f6f5b309f5" ;;
+          v3.10.2.darwin.amd64) EXPECTED_SHA256="dece9b0131af5ced0f8c278a53c0cf06a4f0d1d70a177c0979f6d111654397ce" ;;
+          v3.10.2.darwin.arm64) EXPECTED_SHA256="99702df79737162b986641afb8d98251acb16a52e6cab556a6b6f57c608c059a" ;;
+          *) EXPECTED_SHA256="" ;;
+        esac
 
-        echo "Moving sops to /usr/local/bin/sops (requires sudo)"
-        sudo mv "sops-${SOPS_VERSION}.${SOPS_ARCH}" /usr/local/bin/sops
+        ASSET="sops-${SOPS_VERSION}.${SOPS_ARCH}"
+        BASE_URL="https://github.com/getsops/sops/releases/download/${SOPS_VERSION}"
+        DOWNLOAD_DIR=$(mktemp -d)
+        trap 'rm -rf "$DOWNLOAD_DIR"' EXIT
 
-        echo "Making sops executable (requires sudo)"
-        sudo chmod +x /usr/local/bin/sops
+        echo "Downloading $ASSET"
+        curl -fsSL --retry 3 --retry-delay 5 -o "$DOWNLOAD_DIR/$ASSET" "$BASE_URL/$ASSET"
+
+        if [ -z "$EXPECTED_SHA256" ]; then
+          # Other versions: use the checksum file from the same release.
+          echo "::warning::No pinned checksum for $ASSET. Using the release checksum file."
+          curl -fsSL --retry 3 --retry-delay 5 -o "$DOWNLOAD_DIR/checksums.txt" "$BASE_URL/sops-${SOPS_VERSION}.checksums.txt"
+          EXPECTED_SHA256=$(awk -v asset="$ASSET" '$2 == asset { print $1 }' "$DOWNLOAD_DIR/checksums.txt")
+          if [ -z "$EXPECTED_SHA256" ]; then
+            echo "::error::The release checksum file has no entry for $ASSET"
+            exit 1
+          fi
+        fi
+
+        if command -v sha256sum > /dev/null; then
+          ACTUAL_SHA256=$(sha256sum "$DOWNLOAD_DIR/$ASSET" | awk '{ print $1 }')
+        else
+          ACTUAL_SHA256=$(shasum -a 256 "$DOWNLOAD_DIR/$ASSET" | awk '{ print $1 }')
+        fi
+
+        if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+          echo "::error::Checksum mismatch for $ASSET: expected $EXPECTED_SHA256, got $ACTUAL_SHA256"
+          exit 1
+        fi
+        echo "Checksum OK: $ACTUAL_SHA256"
+
+        sudo install -m 0755 "$DOWNLOAD_DIR/$ASSET" /usr/local/bin/sops
 
         echo "Verifying sops installation:"
         sops --version
@@ -68,14 +110,19 @@ runs:
     - name: Load Secrets from SOPS
       if: inputs.operation == 'load-secrets'
       shell: bash
+      env:
+        SOPS_AGE_KEY: ${{ inputs.sops-age-key }}
+        SOPS_FILE_PATH: ${{ inputs.sops-file-path }}
       run: |
-        if [ -z "${{ inputs.sops-file-path }}" ]; then
+        set -euo pipefail
+
+        if [ -z "$SOPS_FILE_PATH" ]; then
           echo "::error::sops-file-path is required for load-secrets operation"
           exit 1
         fi
 
-        echo "Decrypting secrets from ${{ inputs.sops-file-path }}..."
-        sops --decrypt ${{ inputs.sops-file-path }} | grep -v '^#' | grep -v '^$' | while IFS= read -r line; do
+        echo "Decrypting secrets from $SOPS_FILE_PATH..."
+        sops --decrypt "$SOPS_FILE_PATH" | sed -e '/^#/d' -e '/^$/d' | while IFS= read -r line; do
           # Extract key (everything before the first '=')
           key="${line%%=*}"
           # Extract value (everything after the first '=')
@@ -84,30 +131,33 @@ runs:
           # Check if key and value extraction worked reasonably and value is not empty
           if [ "$key" != "$line" ] && [ -n "$value" ]; then
               echo "::add-mask::$value"
-              echo "$line" >> $GITHUB_ENV # Add the original KEY=VALUE line to env
+              echo "$line" >> "$GITHUB_ENV" # Add the original KEY=VALUE line to env
           else
-              echo "Warning: Skipping line, could not parse KEY=VALUE: $line" >&2
+              echo "Warning: Skipping a line that is not KEY=VALUE" >&2
           fi
         done
         echo "Secrets masked and loaded into environment."
-      env:
-        SOPS_AGE_KEY: ${{ inputs.sops-age-key }}
 
     # Execute Command Operation
     - name: Execute SOPS Command
       if: inputs.operation == 'execute-command'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        SOPS_AGE_KEY: ${{ inputs.sops-age-key }}
+        SOPS_ARGS: ${{ inputs.sops-args }}
       run: |
-        if [ -z "${{ inputs.sops-args }}" ]; then
+        set -euo pipefail
+
+        if [ -z "$SOPS_ARGS" ]; then
           echo "::error::sops-args is required for execute-command operation"
           exit 1
         fi
 
-        echo "Executing SOPS command: sops ${{ inputs.sops-args }}"
-        sops ${{ inputs.sops-args }}
-      env:
-        SOPS_AGE_KEY: ${{ inputs.sops-age-key }}
+        echo "Executing SOPS command: sops $SOPS_ARGS"
+        # xargs splits the arguments and keeps quoted parts together.
+        # It does not run shell code, so the input cannot start other commands.
+        printf '%s\n' "$SOPS_ARGS" | xargs sops
 
 branding:
   icon: "shield"
