@@ -10,13 +10,17 @@ This GitHub Action simplifies the use of [Mozilla SOPS](https://github.com/getso
 
 To use this action in your workflows, add one of the following steps depending upon your goal.
 
+Pin the action to the full commit SHA of a release, not to a branch or tag. A branch or tag can move. Find the SHA with `git ls-remote https://github.com/Byont-Ventures/sops refs/tags/v1.1.0`.
+
+The action checks the SHA-256 checksum of the SOPS binary before it installs it. The default version uses a checksum in `action.yml`. Other versions use the checksum file of the same SOPS release.
+
 ### 1. Install SOPS
 
 Quickly installs a specified version of SOPS into the runner environment. This is useful if you only need the SOPS binary available for subsequent steps.
 
 ```yaml
 - name: Install SOPS
-  uses: byont-ventures/sops@main
+  uses: byont-ventures/sops@<commit-sha> # v1.1.0
   with:
     operation: "install"
     # sops-version: "v3.10.2" # Optional, uses default if not specified
@@ -30,7 +34,7 @@ Decrypts a SOPS-encrypted file and loads its key-value pairs as environment vari
 
 ```yaml
 - name: Load Secrets from SOPS File
-  uses: byont-ventures/sops@main
+  uses: byont-ventures/sops@<commit-sha> # v1.1.0
   with:
     operation: "load-secrets"
     sops-age-key: ${{ secrets.SOPS_AGE_KEY }}
@@ -45,7 +49,7 @@ Executes an arbitrary SOPS command. This is flexible for various use cases like 
 
 ```yaml
 - name: Decrypt a specific value using SOPS
-  uses: byont-ventures/sops@main
+  uses: byont-ventures/sops@<commit-sha> # v1.1.0
   with:
     operation: "execute-command"
     sops-age-key: ${{ secrets.SOPS_AGE_KEY }}
